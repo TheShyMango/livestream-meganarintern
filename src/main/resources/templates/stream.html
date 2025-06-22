@@ -1,67 +1,117 @@
 <!DOCTYPE html>
-<html xmlns:th="http://www.thymeleaf.org">
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Live Stream + Chat</title>
+  <title>Live Stream & Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
 </head>
 <body class="container mt-4">
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h2>🔴 Live Stream</h2>
+  <form th:action="@{/logout}" method="post">
+    <span class="me-2 text-muted">👤 <strong th:text="${#authentication.name}">user</strong></span>
+    <button class="btn btn-outline-danger btn-sm">Logout</button>
+  </form>
+</div>
+
 <div class="row">
-  <!-- Video -->
+  <!-- Video Section -->
   <div class="col-md-8">
-    <h3>Live Stream</h3>
-    <video width="100%" controls autoplay>
-      <source src="/video/sample.mp4" type="video/mp4">
-      Your browser does not support the video tag.
-    </video>
+    <div th:if="${#authorization.expression('hasRole(''ADMIN'')')}">
+      <video id="adminCam" width="100%" autoplay muted playsinline></video>
+      <div class="mt-2">
+        <button class="btn btn-success" onclick="startWebcam()">🎥 Start Stream</button>
+        <button class="btn btn-danger ms-2" onclick="stopWebcam()">🛑 Stop</button>
+      </div>
+    </div>
+
+    <div th:unless="${#authorization.expression('hasRole(''ADMIN'')')}">
+      <video id="viewerStream" width="100%" autoplay playsinline controls muted></video>
+    </div>
   </div>
 
-  <!-- Chat -->
+  <!-- Chat Section -->
   <div class="col-md-4">
-    <h3>Live Chat</h3>
-    <div id="chat-box" class="border rounded p-2 mb-3" style="height: 400px; overflow-y: scroll; background-color: #f8f9fa;"></div>
+    <h4>💬 Public Chat</h4>
+    <div id="chat-box" class="border p-2 mb-2 bg-light" style="height: 400px; overflow-y: auto;"></div>
 
     <form onsubmit="sendMessage(); return false;">
       <input type="hidden" id="username" th:value="${#authentication.name}" />
       <div class="mb-2">
-        <input type="text" id="message" class="form-control" placeholder="Type your message..." required />
+        <input type="text" id="message" class="form-control" placeholder="Type message..." required />
       </div>
       <div class="d-grid">
-        <button type="submit" class="btn btn-primary">Send</button>
+        <button class="btn btn-primary">Send</button>
       </div>
     </form>
   </div>
 </div>
 
 <script>
-  let stompClient = null;
+  const username = /*[[${#authentication.name}]]*/ 'guest';
+  const isAdmin = username === 'admin';
+  let stompClient, peer, localStream;
 
-  function connect() {
-    const socket = new SockJS('/chat-websocket');
-    stompClient = Stomp.over(socket);
-    stompClient.connect({}, function () {
-      stompClient.subscribe('/topic/messages', function (msg) {
-        const data = JSON.parse(msg.body);
-        const chatBox = document.getElementById('chat-box');
-        const newMsg = document.createElement('div');
-        newMsg.innerHTML = `<strong>${data.from}</strong>: ${data.text}`;
-        chatBox.appendChild(newMsg);
-        chatBox.scrollTop = chatBox.scrollHeight;
-      });
+  const iceConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+  const socket = new SockJS('/chat-websocket');
+  stompClient = Stomp.over(socket);
+
+  stompClient.connect({}, () => {
+    stompClient.subscribe('/topic/messages', msg => {
+      const data = JSON.parse(msg.body);
+      const box = document.getElementById('chat-box');
+      const div = document.createElement('div');
+      div.innerHTML = `<strong>${data.from}</strong>: ${data.text}`;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
     });
-  }
+
+    stompClient.subscribe('/topic/signal', msg => {
+      const signal = JSON.parse(msg.body);
+      if (signal.from === username) return;
+      if (!isAdmin && signal.type) {
+        if (!peer || peer.destroyed) {
+          peer = new SimplePeer({ initiator: false, trickle: false, config: iceConfig });
+          peer.on('signal', data => {
+            stompClient.send('/app/signal', {}, JSON.stringify({ ...data, from: username }));
+          });
+          peer.on('stream', stream => {
+            document.getElementById('viewerStream').srcObject = stream;
+          });
+        }
+        try { peer.signal(signal); } catch (e) { console.warn("[Viewer] signal error", e.message); }
+      }
+    });
+  });
 
   function sendMessage() {
-    const user = document.getElementById('username').value || "Anonymous";
+    const user = document.getElementById('username').value;
     const text = document.getElementById('message').value;
     if (!text.trim()) return;
-    stompClient.send("/app/chat", {}, JSON.stringify({ from: user, text: text }));
+    stompClient.send('/app/chat', {}, JSON.stringify({ from: user, text }));
     document.getElementById('message').value = '';
   }
 
-  connect();
+  function startWebcam() {
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+      document.getElementById('adminCam').srcObject = stream;
+      localStream = stream;
+      peer = new SimplePeer({ initiator: true, trickle: false, stream, config: iceConfig });
+      peer.on('signal', data => {
+        stompClient.send('/app/signal', {}, JSON.stringify({ ...data, from: username }));
+      });
+    }).catch(err => alert("Webcam blocked or unavailable."));
+  }
+
+  function stopWebcam() {
+    if (localStream) localStream.getTracks().forEach(t => t.stop());
+    if (peer) peer.destroy();
+    document.getElementById('adminCam').srcObject = null;
+  }
 </script>
 </body>
 </html>
