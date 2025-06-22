@@ -1,9 +1,9 @@
-// SignalController.java
 package com.example.streaming.controller;
 
 import com.example.streaming.model.SignalMessage;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.handler.annotation.MessageMapping;
-import org.springframework.messaging.handler.annotation.SendTo;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Controller;
 
 import java.security.Principal;
@@ -11,10 +11,20 @@ import java.security.Principal;
 @Controller
 public class SignalController {
 
+    @Autowired
+    private SimpMessagingTemplate messagingTemplate;
+
     @MessageMapping("/signal")
-    @SendTo("/topic/signal")
-    public SignalMessage forwardSignal(SignalMessage signal, Principal principal) {
+    public void handleSignal(SignalMessage signal, Principal principal) {
         signal.setFrom(principal.getName());
-        return signal;
+
+        if (signal.getTo() != null && !signal.getTo().isEmpty()) {
+            // 1-to-1 fallback
+            messagingTemplate.convertAndSendToUser(signal.getTo(), "/queue/signal", signal);
+        } else {
+            // Broadcast from admin
+            messagingTemplate.convertAndSend("/topic/signal", signal);
+        }
     }
 }
+

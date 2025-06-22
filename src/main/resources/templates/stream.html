@@ -8,8 +8,10 @@
   <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
+  <link rel="icon" href="data:,">
 </head>
 <body class="container mt-4">
+
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h2>🔴 Live Stream</h2>
   <form th:action="@{/logout}" method="post">
@@ -19,7 +21,6 @@
 </div>
 
 <div class="row">
-  <!-- Video Section -->
   <div class="col-md-8">
     <div th:if="${#authorization.expression('hasRole(''ADMIN'')')}">
       <video id="adminCam" width="100%" autoplay muted playsinline></video>
@@ -28,17 +29,14 @@
         <button class="btn btn-danger ms-2" onclick="stopWebcam()">🛑 Stop</button>
       </div>
     </div>
-
     <div th:unless="${#authorization.expression('hasRole(''ADMIN'')')}">
       <video id="viewerStream" width="100%" autoplay playsinline controls muted></video>
     </div>
   </div>
 
-  <!-- Chat Section -->
   <div class="col-md-4">
     <h4>💬 Public Chat</h4>
     <div id="chat-box" class="border p-2 mb-2 bg-light" style="height: 400px; overflow-y: auto;"></div>
-
     <form onsubmit="sendMessage(); return false;">
       <input type="hidden" id="username" th:value="${#authentication.name}" />
       <div class="mb-2">
@@ -61,6 +59,9 @@
   stompClient = Stomp.over(socket);
 
   stompClient.connect({}, () => {
+    console.log("[WebSocket] Connected as", username);
+
+    // Chat subscription
     stompClient.subscribe('/topic/messages', msg => {
       const data = JSON.parse(msg.body);
       const box = document.getElementById('chat-box');
@@ -70,48 +71,108 @@
       box.scrollTop = box.scrollHeight;
     });
 
+    // Global signaling
     stompClient.subscribe('/topic/signal', msg => {
       const signal = JSON.parse(msg.body);
       if (signal.from === username) return;
-      if (!isAdmin && signal.type) {
+
+      if (!isAdmin && signal.type === 'offer') {
         if (!peer || peer.destroyed) {
-          peer = new SimplePeer({ initiator: false, trickle: false, config: iceConfig });
-          peer.on('signal', data => {
-            stompClient.send('/app/signal', {}, JSON.stringify({ ...data, from: username }));
-          });
-          peer.on('stream', stream => {
-            document.getElementById('viewerStream').srcObject = stream;
-          });
+          initViewerPeer(signal.from, signal);
         }
-        try { peer.signal(signal); } catch (e) { console.warn("[Viewer] signal error", e.message); }
+      }
+    });
+
+    // Private response channel
+    stompClient.subscribe('/user/queue/signal', msg => {
+      const signal = JSON.parse(msg.body);
+      if (!isAdmin && (!peer || peer.destroyed)) {
+        initViewerPeer(signal.from, signal);
       }
     });
   });
+
+  function initViewerPeer(fromUser, signal) {
+    peer = new SimplePeer({ initiator: false, trickle: false, config: iceConfig });
+
+    peer.on('signal', data => {
+      stompClient.send('/app/signal', {}, JSON.stringify({
+        ...data,
+        from: username,
+        to: fromUser,
+        type: 'answer'
+      }));
+    });
+
+    peer.on('track', (track, stream) => {
+      console.log("[Viewer] Track received:", track.kind);
+      const viewerVideo = document.getElementById('viewerStream');
+      if (viewerVideo) {
+        viewerVideo.srcObject = stream;
+      } else {
+        console.warn("[Viewer] Video element not found");
+      }
+    });
+
+    peer.on('connect', () => console.log("[Viewer] WebRTC connected"));
+    peer.on('error', err => console.error("[Viewer] Peer error", err));
+    peer.on('close', () => {
+      console.log("[Viewer] Peer closed");
+      peer = null;
+    });
+
+    try {
+      peer.signal(signal);
+    } catch (err) {
+      console.warn("[Viewer] Signal error", err.message);
+    }
+  }
+
 
   function sendMessage() {
     const user = document.getElementById('username').value;
     const text = document.getElementById('message').value;
     if (!text.trim()) return;
-    stompClient.send('/app/chat', {}, JSON.stringify({ from: user, text }));
+    stompClient.send("/app/chat", {}, JSON.stringify({ from: user, text }));
     document.getElementById('message').value = '';
   }
 
   function startWebcam() {
+    if (peer && !peer.destroyed) return;
+
     navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
       document.getElementById('adminCam').srcObject = stream;
       localStream = stream;
+
       peer = new SimplePeer({ initiator: true, trickle: false, stream, config: iceConfig });
+
       peer.on('signal', data => {
-        stompClient.send('/app/signal', {}, JSON.stringify({ ...data, from: username }));
+        stompClient.send('/app/signal', {}, JSON.stringify({
+          ...data,
+          from: username,
+          type: 'offer'
+        }));
       });
-    }).catch(err => alert("Webcam blocked or unavailable."));
+
+      peer.on('connect', () => console.log("[Admin] Peer connected"));
+      peer.on('error', err => console.error("[Admin] Error", err));
+      peer.on('close', () => {
+        console.log("[Admin] Peer closed");
+        peer = null;
+      });
+    }).catch(err => {
+      alert("Webcam access denied.");
+      console.error("Media error:", err.message);
+    });
   }
 
   function stopWebcam() {
     if (localStream) localStream.getTracks().forEach(t => t.stop());
     if (peer) peer.destroy();
+    peer = null;
     document.getElementById('adminCam').srcObject = null;
   }
 </script>
+
 </body>
 </html>
